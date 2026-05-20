@@ -283,7 +283,9 @@ Your task is to deduplicate identical or overlapping concerns.
 1. Group concerns that refer to the same root cause or the same line of code.
 2. Merge overlapping concerns into a single, comprehensive concern. Combine their reasonings if they complement each other.
 3. Ensure the output contains only unique concerns.
-4. Preserve the `preexisting` flag. If you merge a pre-existing concern with a newly introduced one, flag it based on the root cause (if the root cause is new, it's not pre-existing)."
+4. Preserve the `preexisting` flag. If you merge a pre-existing concern with a newly introduced one, flag it based on the root cause (if the root cause is new, it's not pre-existing).
+5. SPECIFICITY REQUIREMENT: When merging concerns, preserve and consolidate the most specific details: exact function names, file paths, line numbers when known, and triggering conditions. Never generalize a specific finding into a vague category.
+6. Preserve and merge the `locations` arrays from the input concerns. If multiple concerns describe the same root cause, keep the most precise file/function_or_symbol/line/code_snippet/why_this_location_matters locations. Do not invent line numbers; keep `line` as null when the exact line is not known."
             }
             9 => {
                 "# Stage 9. Verification and severity estimation
@@ -294,7 +296,9 @@ You are the lead reviewer validating consolidated concerns. You will be given a 
 3. If context from subsequent patches in the series is provided, check if the concern is fixed later in the series. If so, discard it. But don't trust any promises in the commit message if they can't be verified (e.g. something will be fixed by subsequent patches in the series - if you can't prove that it's indeed fixed, report it as a bug).
 4. When referring to other patches within this series in your explanation, DO NOT use git hashes (they are ephemeral/unstable). Instead, refer to them by their patch subject (e.g., 'commit \"mm: fix allocation\"'). Existing historical commits in the tree should still be referenced by their standard hash.
 5. Assign a severity (low, medium, high, critical) to each remaining valid finding and explain the reasoning. Be rigorous in filtering out verifiable noise, but accurately report real logic flaws and edge cases.
-6. If the problem did exist in the code before the patch was applied, say it explicitly: 'This problem wasn't introduced by this patch, but...'. Discard low- and medium-severity pre-existing problems, report only high- and critical severity issues."
+6. If the problem did exist in the code before the patch was applied, say it explicitly: 'This problem wasn't introduced by this patch, but...'. Discard low- and medium-severity pre-existing problems, report only high- and critical severity issues.
+7. SPECIFICITY REQUIREMENT: Every finding MUST cite the exact function name(s), file path(s), line number(s) when known, and triggering conditions where the bug manifests. Vague descriptions like 'potential overflow in ring buffer calculations' are insufficient. State precisely which variable overflows, in which function, and under what input conditions. Do not invent line numbers; use `line: null` when the exact line is not known.
+8. Carry forward the `locations` from the validated concern into each finding. If you gather better evidence, replace vague locations with the most precise file/function_or_symbol/line/code_snippet/why_this_location_matters locations you verified."
             }
             10 => {
                 "# Stage 10. LKML-friendly report generation
@@ -303,7 +307,9 @@ You are an automated review bot generating a report for the Linux Kernel Mailing
 
 CRITICAL RULE: If a finding is flagged as pre-existing (`\"preexisting\": true`), you MUST explicitly state in your inline comment that this issue is pre-existing and was not introduced by the patch under review. Use phrasing like \"This isn't a bug introduced by this patch, but...\" or \"This is a pre-existing issue, but...\" to start the comment.
 
-Follow the formatting rules strictly. Do not use markdown headers or ALL CAPS shouting. Ensure the tone is constructive and professional. Do not use backticks to quote any names or expressions."
+Follow the formatting rules strictly. Do not use markdown headers or ALL CAPS shouting. Ensure the tone is constructive and professional. Do not use backticks to quote any names or expressions.
+
+SPECIFICITY REQUIREMENT: Each inline comment MUST reference the exact function name, file, line number when known, and specific triggering condition. Prefer the finding's `locations` field when present. Do not produce vague summaries like 'potential issue in error handling'. State precisely what goes wrong, where, and under what circumstances. Do not invent line numbers; if the exact line is unavailable, anchor the comment to the nearest verified function or symbol and explain the triggering condition."
             }
             _ => "",
         };
@@ -732,14 +738,16 @@ You MUST respond with ONLY a JSON object, no other text. Example:
                 clean_shared_context.clone()
             };
 
-            let format_guidance = r#"Once you have gathered sufficient information, return ONLY a JSON object with a "concerns" array.
+            let format_guidance = r#"TodoWrite compatibility: vendored prompts may ask you to add tasks or suspected bugs to TodoWrite. Do not call or mention TodoWrite. Treat those instructions as an internal checklist only. If that checklist identifies a concrete suspected bug, carry it forward as a JSON concern with file, function_or_symbol, line when known, triggering condition, and evidence. Do not output generic checklist progress as a concern.
+
+Once you have gathered sufficient information, return ONLY a JSON object with a "concerns" array.
 If you find no concerns, return `{"concerns": []}`.
 If you find concerns, each must be an object with:
 - "type": A short category string.
 - "description": A clear description of the problem.
 - "reasoning": A step-by-step explanation.
 - "preexisting": A boolean value: `true` if this bug/vulnerability already existed in the codebase before these patches were applied, or `false` if the issue was newly introduced by the reviewed patchset.
-- "locations": An array of objects, each containing "file", "function/symbol", and "code_snippet" strings.
+- "locations": An array of objects, each containing "file", "function_or_symbol", "line", "code_snippet", and "why_this_location_matters". Use `null` for "file", "function_or_symbol", "line", or "code_snippet" when an issue is non-local or the exact value is not known. Do not invent line numbers; use `line: null` when the exact line is not known and explain the triggering condition in "reasoning".
 
 CRITICAL REVIEW DIRECTIVE: Do NOT dismiss concerns just because you assume the surrounding system or caller handles it perfectly. Do not be overly charitable to the existing code. If there is a missing initialization, an unhandled edge case, or a brittle logic flow, report it as a concern immediately. Assume the worst-case scenario where external inputs and caller states are malformed.
 
@@ -755,8 +763,10 @@ Example:
       "locations": [
         {
           "file": "path/to/file.c",
-          "function/symbol": "function_name",
-          "code_snippet": "problematic_code();"
+          "function_or_symbol": "function_name",
+          "line": 123,
+          "code_snippet": "problematic_code();",
+          "why_this_location_matters": "This is where the newly allocated resource is dropped on the error path."
         }
       ]
     }
@@ -896,11 +906,11 @@ Example:
                 serde_json::to_string_pretty(&all_concerns).unwrap_or_default();
 
             let user_prompt = format!(
-                "{}\n\nAggregated Concerns:\n{}\n\nReturn ONLY a JSON object with a 'concerns' array. Each object in the 'concerns' array MUST use exactly the following keys: \"type\", \"description\", \"reasoning\", \"preexisting\".\n\nExample Output:\n```json\n{{\n  \"concerns\": [\n    {{\n      \"type\": \"Memory Leak\",\n      \"description\": \"Memory leak in function X\",\n      \"reasoning\": \"1. X is called.\\\n2. Y is allocated but not freed on error path.\",\n      \"preexisting\": false\n    }}\n  ]\n}}\n```",
+                "{}\n\nAggregated Concerns:\n{}\n\nReturn ONLY a JSON object with a 'concerns' array. Each object in the 'concerns' array MUST use exactly the following keys: \"type\", \"description\", \"reasoning\", \"preexisting\", \"locations\".\n\nExample Output:\n```json\n{{\n  \"concerns\": [\n    {{\n      \"type\": \"Memory Leak\",\n      \"description\": \"Memory leak in function X\",\n      \"reasoning\": \"1. X is called.\\\n2. Y is allocated but not freed on error path.\",\n      \"preexisting\": false,\n      \"locations\": [\n        {{\n          \"file\": \"path/to/file.c\",\n          \"function_or_symbol\": \"function_name\",\n          \"line\": 123,\n          \"code_snippet\": \"problematic_code();\",\n          \"why_this_location_matters\": \"This is where the newly allocated resource is dropped on the error path.\"\n        }}\n      ]\n    }}\n  ]\n}}\n```",
                 stage_prompt, aggregated_concerns_json
             );
             let clean_user_prompt = format!(
-                "{}\n\nAggregated Concerns:\n{}\n\nReturn ONLY a JSON object with a 'concerns' array. Each object in the 'concerns' array MUST use exactly the following keys: \"type\", \"description\", \"reasoning\", \"preexisting\".\n\nExample Output:\n```json\n{{\n  \"concerns\": [\n    {{\n      \"type\": \"Memory Leak\",\n      \"description\": \"Memory leak in function X\",\n      \"reasoning\": \"1. X is called.\\\n2. Y is allocated but not freed on error path.\",\n      \"preexisting\": false\n    }}\n  ]\n}}\n```",
+                "{}\n\nAggregated Concerns:\n{}\n\nReturn ONLY a JSON object with a 'concerns' array. Each object in the 'concerns' array MUST use exactly the following keys: \"type\", \"description\", \"reasoning\", \"preexisting\", \"locations\".\n\nExample Output:\n```json\n{{\n  \"concerns\": [\n    {{\n      \"type\": \"Memory Leak\",\n      \"description\": \"Memory leak in function X\",\n      \"reasoning\": \"1. X is called.\\\n2. Y is allocated but not freed on error path.\",\n      \"preexisting\": false,\n      \"locations\": [\n        {{\n          \"file\": \"path/to/file.c\",\n          \"function_or_symbol\": \"function_name\",\n          \"line\": 123,\n          \"code_snippet\": \"problematic_code();\",\n          \"why_this_location_matters\": \"This is where the newly allocated resource is dropped on the error path.\"\n        }}\n      ]\n    }}\n  ]\n}}\n```",
                 clean_stage_prompt, aggregated_concerns_json
             );
 
@@ -1007,11 +1017,11 @@ Example:
             let deduplicated_concerns_json =
                 serde_json::to_string_pretty(&deduplicated_concerns).unwrap_or_default();
             let user_prompt = format!(
-                "{}\n\nCRITICAL REVIEW DIRECTIVE: To dismiss a concern as a false positive, you must find concrete evidence in the code that proves the concern is invalid (e.g., verifying the caller handles the edge case). If you cannot find concrete proof of safety, you must retain the concern.\n\nFull Series Context:\n{}\n\nConsolidated Concerns:\n{}\n\nReturn ONLY a JSON object with a 'findings' array. Each object in the 'findings' array MUST use exactly the following keys: \"problem\" (a string containing the vulnerability description), \"severity\" (a string: Low, Medium, High, or Critical), \"severity_explanation\" (a string detailing the reasoning and proof), \"preexisting\" (a boolean: true if the problem already existed in the codebase before these patches were applied, or false if it was newly introduced by the reviewed patchset).\n\nExample Output:\n```json\n{{\n  \"findings\": [\n    {{\n      \"problem\": \"Memory leak in function X when condition Y is met.\",\n      \"severity\": \"High\",\n      \"severity_explanation\": \"1. Condition Y is met.\\\n2. The buffer is allocated but not freed before return.\",\n      \"preexisting\": false\n    }}\n  ]\n}}\n```",
+                "{}\n\nCRITICAL REVIEW DIRECTIVE: To dismiss a concern as a false positive, you must find concrete evidence in the code that proves the concern is invalid (e.g., verifying the caller handles the edge case). If you cannot find concrete proof of safety, you must retain the concern.\n\nFull Series Context:\n{}\n\nConsolidated Concerns:\n{}\n\nReturn ONLY a JSON object with a 'findings' array. Each object in the 'findings' array MUST use exactly the following keys: \"problem\" (a string containing the vulnerability description), \"severity\" (a string: Low, Medium, High, or Critical), \"severity_explanation\" (a string detailing the reasoning and proof), \"preexisting\" (a boolean: true if the problem already existed in the codebase before these patches were applied, or false if it was newly introduced by the reviewed patchset), \"locations\" (an array of objects with file, function_or_symbol, line, code_snippet, and why_this_location_matters).\n\nExample Output:\n```json\n{{\n  \"findings\": [\n    {{\n      \"problem\": \"Memory leak in function X when condition Y is met.\",\n      \"severity\": \"High\",\n      \"severity_explanation\": \"1. Condition Y is met.\\\n2. The buffer is allocated but not freed before return.\",\n      \"preexisting\": false,\n      \"locations\": [\n        {{\n          \"file\": \"path/to/file.c\",\n          \"function_or_symbol\": \"function_name\",\n          \"line\": 123,\n          \"code_snippet\": \"problematic_code();\",\n          \"why_this_location_matters\": \"This is where the newly allocated resource is dropped on the error path.\"\n        }}\n      ]\n    }}\n  ]\n}}\n```",
                 stage_prompt, full_series_context, deduplicated_concerns_json
             );
             let clean_user_prompt = format!(
-                "{}\n\nCRITICAL REVIEW DIRECTIVE: To dismiss a concern as a false positive, you must find concrete evidence in the code that proves the concern is invalid (e.g., verifying the caller handles the edge case). If you cannot find concrete proof of safety, you must retain the concern.\n\nFull Series Context:\n{{{{series context}}}}\n\nConsolidated Concerns:\n{}\n\nReturn ONLY a JSON object with a 'findings' array. Each object in the 'findings' array MUST use exactly the following keys: \"problem\" (a string containing the vulnerability description), \"severity\" (a string: Low, Medium, High, or Critical), \"severity_explanation\" (a string detailing the reasoning and proof), \"preexisting\" (a boolean: true if the problem already existed in the codebase before these patches were applied, or false if it was newly introduced by the reviewed patchset).\n\nExample Output:\n```json\n{{\n  \"findings\": [\n    {{\n      \"problem\": \"Memory leak in function X when condition Y is met.\",\n      \"severity\": \"High\",\n      \"severity_explanation\": \"1. Condition Y is met.\\\n2. The buffer is allocated but not freed before return.\",\n      \"preexisting\": false\n    }}\n  ]\n}}\n```",
+                "{}\n\nCRITICAL REVIEW DIRECTIVE: To dismiss a concern as a false positive, you must find concrete evidence in the code that proves the concern is invalid (e.g., verifying the caller handles the edge case). If you cannot find concrete proof of safety, you must retain the concern.\n\nFull Series Context:\n{{{{series context}}}}\n\nConsolidated Concerns:\n{}\n\nReturn ONLY a JSON object with a 'findings' array. Each object in the 'findings' array MUST use exactly the following keys: \"problem\" (a string containing the vulnerability description), \"severity\" (a string: Low, Medium, High, or Critical), \"severity_explanation\" (a string detailing the reasoning and proof), \"preexisting\" (a boolean: true if the problem already existed in the codebase before these patches were applied, or false if it was newly introduced by the reviewed patchset), \"locations\" (an array of objects with file, function_or_symbol, line, code_snippet, and why_this_location_matters).\n\nExample Output:\n```json\n{{\n  \"findings\": [\n    {{\n      \"problem\": \"Memory leak in function X when condition Y is met.\",\n      \"severity\": \"High\",\n      \"severity_explanation\": \"1. Condition Y is met.\\\n2. The buffer is allocated but not freed before return.\",\n      \"preexisting\": false,\n      \"locations\": [\n        {{\n          \"file\": \"path/to/file.c\",\n          \"function_or_symbol\": \"function_name\",\n          \"line\": 123,\n          \"code_snippet\": \"problematic_code();\",\n          \"why_this_location_matters\": \"This is where the newly allocated resource is dropped on the error path.\"\n        }}\n      ]\n    }}\n  ]\n}}\n```",
                 clean_stage_prompt, deduplicated_concerns_json
             );
             match self
